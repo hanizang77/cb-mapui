@@ -10391,8 +10391,8 @@ function getRecommendedSpec(idx, latitude, longitude) {
               // ndCount input validation
               const vmCountInput = document.getElementById('ndCount');
               let ndCount = parseInt(vmCountInput.value, 10);
-              if (isNaN(ndCount) || ndCount < 1 || ndCount > 100) {
-                Swal.showValidationMessage('Enter a valid number between 1 and 100');
+              if (isNaN(ndCount) || ndCount < 1) {
+                Swal.showValidationMessage('Enter a valid Node count (1 or more)');
                 return false;
               }
 
@@ -11022,9 +11022,13 @@ function buildSpecConfigPopupHtml(spec, nodeConf, options = {}) {
       <div class="popup-row">
         <div class="popup-col">
           <div class="popup-field">
-            <label class="popup-label">Node Count (1-1000)</label>
-            <input type="number" id="${isEdit ? 'editVmCount' : 'ndCount'}" class="popup-input" 
-                   min="1" max="1000" value="${nodeConf.nodeGroupSize || '1'}">
+            <label class="popup-label">Node Count (recommended 1–1000)</label>
+            <input type="number" id="${isEdit ? 'editVmCount' : 'ndCount'}" class="popup-input"
+                   min="1" value="${nodeConf.nodeGroupSize || '1'}"
+                   oninput="(function(el){var w=document.getElementById('ndCountWarn');if(w)w.style.display=(parseInt(el.value,10)>1000)?'block':'none';})(this)">
+            <div id="ndCountWarn" style="display:${(parseInt(nodeConf.nodeGroupSize,10)||1)>1000?'block':'none'};margin-top:4px;font-size:0.78rem;color:#fd7e14;">
+              ⚠️ Over 1000 nodes — allowed, but provisioning may be slow or exceed CSP quotas.
+            </div>
           </div>
         </div>
       </div>
@@ -11139,6 +11143,13 @@ function updateNodeGroupReview() {
     `;
   }
   
+  if (nodeGroupRequestFromSpecList.length >= 2) {
+    buttonsHtml += `
+      <button type="button" onClick="window.bulkEditNodeGroups();" class="btn btn-outline-info btn-sm"
+              style="font-size: 0.78rem; padding: 6px 8px;" title="Set one key/value across ALL NodeGroups at once">
+        ✏️ Bulk Edit All NodeGroups (${nodeGroupRequestFromSpecList.length})
+      </button>`;
+  }
   buttonsHtml += '</div>';
   actionButtonsContainer.innerHTML = buttonsHtml;
   nodegroupList.appendChild(actionButtonsContainer);
@@ -11354,6 +11365,138 @@ function getContrastTextColor(color) {
   const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
   return luminance > LUMINANCE_THRESHOLD ? '#333' : 'white';
 }
+
+// ==== Bulk edit: set one key/path across ALL NodeGroups at once =========================
+// Flatten a NodeGroup config to scalar leaf paths (dot notation), so a key that appears at
+// different nesting levels stays distinguishable by its full path (e.g. "rootDiskType" vs
+// "label.rootDiskType"). Arrays are skipped — not a single scalar to bulk-set.
+function bulkFlattenNodeConf(obj, prefix, out) {
+  out = out || {}; prefix = prefix || '';
+  for (const k in obj) {
+    if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+    const v = obj[k];
+    const path = prefix ? prefix + '.' + k : k;
+    if (v !== null && typeof v === 'object' && !Array.isArray(v)) bulkFlattenNodeConf(v, path, out);
+    else if (v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') out[path] = v;
+  }
+  return out;
+}
+function bulkSetByPath(obj, path, value) {
+  const parts = path.split('.'); let o = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (o[parts[i]] == null || typeof o[parts[i]] !== 'object') o[parts[i]] = {};
+    o = o[parts[i]];
+  }
+  o[parts[parts.length - 1]] = value;
+}
+// Analyse every key-path across all NodeGroups: distinct values, uniform?, missing-in-some?, type.
+function bulkCollectKeys() {
+  const groups = nodeGroupRequestFromSpecList || [];
+  const flats = groups.map(g => bulkFlattenNodeConf(g));
+  const paths = new Set(); flats.forEach(f => Object.keys(f).forEach(p => paths.add(p)));
+  const info = {};
+  paths.forEach(p => {
+    const present = flats.filter(f => p in f).map(f => f[p]);
+    const distinct = Array.from(new Set(present.map(v => JSON.stringify(v)))).map(s => JSON.parse(s));
+    info[p] = {
+      uniform: distinct.length <= 1 && present.length === groups.length, // same value & set on every group
+      partial: present.length !== groups.length,                          // absent on some groups
+      distinct: distinct,
+      type: typeof present.find(v => v !== null && v !== undefined),
+    };
+  });
+  return { groups, flats, info, paths: Array.from(paths).sort() };
+}
+// Render a single value for display: empty string / null / undefined show as a muted "(empty)".
+function bulkFmtVal(v) {
+  if (v === '' || v === null || v === undefined)
+    return '<span style="color:#adb5bd;font-style:italic;">(empty)</span>';
+  return '<code>' + escapeHtml(String(v)) + '</code>';
+}
+
+// Step 1: list every key as a color-coded button (green = same across all, orange = differs/partial).
+window.bulkEditNodeGroups = function () {
+  const { groups, info, paths } = bulkCollectKeys();
+  if (!groups.length) { if (typeof infoAlert === 'function') infoAlert('No NodeGroups configured yet.'); return; }
+  const rows = paths.map(p => {
+    const d = info[p];
+    let color, disp;
+    if (d.uniform) {
+      color = '#28a745';                                   // green: identical everywhere
+      disp = bulkFmtVal(d.distinct[0]);
+    } else {
+      color = '#fd7e14';                                   // orange: mixed or missing on some
+      const vals = d.distinct.slice(0, 3).map(v => bulkFmtVal(v)).join(', ') + (d.distinct.length > 3 ? ', …' : '');
+      disp = '<span style="color:#fd7e14;">' + vals + (d.partial ? ' <i>(missing on some)</i>' : '') + '</span>';
+    }
+    return `<button type="button" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center"
+              style="padding:6px 10px; font-size:0.85rem;" onclick="window.bulkEditKey('${p.replace(/'/g, "\\'")}')">
+              <span><span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:${color};margin-right:8px;vertical-align:middle;"></span>
+              <code style="color:#0d6efd;">${escapeHtml(p)}</code></span>
+              <span style="max-width:55%;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${disp}</span>
+            </button>`;
+  }).join('');
+  Swal.fire({
+    title: `✏️ Bulk Edit — ${groups.length} NodeGroups`,
+    width: 660,
+    html: `<div style="text-align:left;font-size:0.8rem;color:#6c757d;margin-bottom:8px;">
+             <span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#28a745;vertical-align:middle;"></span> same across all &nbsp;
+             <span style="display:inline-block;width:11px;height:11px;border-radius:50%;background:#fd7e14;vertical-align:middle;"></span> differs / missing on some
+             &nbsp;— click a key to set it on <b>all</b> NodeGroups.</div>
+           <div class="list-group" style="max-height:52vh;overflow:auto;">${rows}</div>`,
+    showConfirmButton: false,
+    showCloseButton: true,
+  });
+};
+
+// Step 2: show current per-group values for the chosen key + one input applied to every group.
+window.bulkEditKey = function (path) {
+  const { groups, flats, info } = bulkCollectKeys();
+  const d = info[path]; if (!d) return;
+  const isBool = d.type === 'boolean';
+  const isNum = d.type === 'number';
+  const seed = d.distinct.length === 1 ? d.distinct[0] : '';
+  const table = groups.map((g, i) => {
+    const has = path in flats[i]; const v = flats[i][path];
+    return `<tr><td style="color:#495057;padding:2px 6px;">${escapeHtml(g.name || ('group ' + i))}</td>
+              <td style="text-align:right;padding:2px 6px;">${has ? bulkFmtVal(v) : '<span style="color:#adb5bd;">(none)</span>'}</td></tr>`;
+  }).join('');
+  const inputHtml = isBool
+    ? `<label style="font-size:0.9rem;"><input type="checkbox" id="bulkVal" ${seed ? 'checked' : ''}> set <b>true</b> on all (uncheck for false)</label>`
+    : `<input type="${isNum ? 'number' : 'text'}" id="bulkVal" class="swal2-input" style="margin:6px 0;width:90%;" value="${escapeHtml(String(seed ?? ''))}" placeholder="new value for all NodeGroups">`;
+  Swal.fire({
+    title: `Set "${path}"`,
+    width: 560,
+    html: `<div style="text-align:left;">
+             <div style="font-size:0.82rem;color:#6c757d;margin-bottom:4px;">applied to all <b>${groups.length}</b> NodeGroups</div>
+             <div>${inputHtml}</div>
+             <details style="margin-top:6px;"><summary style="cursor:pointer;font-size:0.8rem;color:#6c757d;">current values per NodeGroup</summary>
+               <div style="max-height:32vh;overflow:auto;margin-top:4px;"><table style="width:100%;font-size:0.8rem;border-collapse:collapse;"><tbody>${table}</tbody></table></div>
+             </details></div>`,
+    showCancelButton: true,
+    confirmButtonText: 'Apply to all',
+    confirmButtonColor: '#28a745',
+    cancelButtonText: '← Back',
+    focusConfirm: false,
+    preConfirm: () => {
+      const el = document.getElementById('bulkVal');
+      if (isBool) return el.checked;
+      const raw = el.value;
+      if (isNum) { const n = Number(raw); if (raw.trim() === '' || isNaN(n)) { Swal.showValidationMessage('Enter a number'); return false; } return n; }
+      return raw;
+    }
+  }).then(res => {
+    if (res.isConfirmed) {
+      groups.forEach(g => bulkSetByPath(g, path, res.value));
+      if (typeof renderMapFromConfig === 'function') renderMapFromConfig();
+      updateNodeGroupReview();
+      if (typeof successAlert === 'function') successAlert(`Set "${path}" = ${JSON.stringify(res.value)} on all ${groups.length} NodeGroups.`);
+      window.bulkEditNodeGroups();               // reopen the key list with refreshed colors
+    } else if (res.dismiss === Swal.DismissReason.cancel) {
+      window.bulkEditNodeGroups();               // ← Back to the key list
+    }
+  });
+};
 
 function editNodeGroup(index) {
   const nodeConf = nodeGroupRequestFromSpecList[index];
