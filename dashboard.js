@@ -11,6 +11,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Resolve the CB-Tumblebug API base. Prefer the parent's gateway/base URL
+// override (apiBaseUrl); fall back to the direct host:port only when it is not
+// set. Using the raw host:port breaks when the browser reaches mapui through a
+// gateway and the direct TB port (1323) is not exposed (ERR_CONNECTION_REFUSED).
+function tbApiBase() {
+  const c = (window.parent && window.parent.getConfig && window.parent.getConfig()) || {};
+  return c.apiBaseUrl || `http://${c.hostname || 'localhost'}:${c.port || '1323'}/tumblebug`;
+}
+
 // Axios interceptor: inject X-Credential-Holder header into all dashboard API requests
 axios.interceptors.request.use(function (axiosConfig) {
   // Get credential holder from parent window (index.js) config
@@ -153,7 +162,7 @@ async function deleteResourceAsync(resourceType, resourceId, additionalParams = 
     */
 
     // Make DELETE request using axios with auth (same as index.js)
-    const fullUrl = `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug${endpoint}`;
+    const fullUrl = `${tbApiBase()}${endpoint}`;
     
     // Get credential holder from parent config
     const credentialHolder = parentConfig.credentialHolder || 'admin';
@@ -1076,7 +1085,7 @@ async function testConnection() {
     password: 'default' 
   };
   
-  const url = `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug/readyz`;
+  const url = `${tbApiBase()}/readyz`;
   
   try {
     const response = await axios.get(url, {
@@ -1113,7 +1122,7 @@ async function loadInfraData() {
     password: 'default' 
   };
   
-  const url = `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug/ns/${dashboardConfig.namespace}/infra`;
+  const url = `${tbApiBase()}/ns/${dashboardConfig.namespace}/infra`;
   
   try {
     const response = await axios.get(url, {
@@ -1128,7 +1137,7 @@ async function loadInfraData() {
 
     // Nodes come from the namespace-wide listing: one call, each item already carries
     // its parent infraId (no per-Infra aggregation on the client)
-    const nodeUrl = `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug/ns/${dashboardConfig.namespace}/resources/node`;
+    const nodeUrl = `${tbApiBase()}/ns/${dashboardConfig.namespace}/resources/node`;
     const infraStatusById = {};
     infraData.forEach(infra => { infraStatusById[infra.id] = infra.status; });
     try {
@@ -1168,7 +1177,7 @@ async function loadResourceOverview() {
   
   for (const resourceType of resources) {
     try {
-      const url = `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug/ns/${dashboardConfig.namespace}/resources/${resourceType}`;
+      const url = `${tbApiBase()}/ns/${dashboardConfig.namespace}/resources/${resourceType}`;
       
       const response = await axios.get(url, {
         auth: {
@@ -2430,7 +2439,7 @@ async function controlInfra(infraId, action) {
   // Get current namespace from parent window's namespace element
   const currentNamespace = window.parent?.configNamespace || 'default';
   
-  const url = `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug/ns/${currentNamespace}/control/infra/${infraId}?action=${action}`;
+  const url = `${tbApiBase()}/ns/${currentNamespace}/control/infra/${infraId}?action=${action}`;
   
   try {
     showRefreshIndicator(true);
@@ -2475,7 +2484,7 @@ async function controlNode(infraId, nodeId, action) {
   // Get current namespace from parent window's namespace element
   const currentNamespace = window.parent?.configNamespace || 'default';
   
-  const url = `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug/ns/${currentNamespace}/control/infra/${infraId}/node/${nodeId}?action=${action}`;
+  const url = `${tbApiBase()}/ns/${currentNamespace}/control/infra/${infraId}/node/${nodeId}?action=${action}`;
   
   try {
     showRefreshIndicator(true);
@@ -2524,7 +2533,7 @@ async function viewNodeDetails(infraId, nodeId) {
     const parentConfig = window.parent?.getConfig?.() ||
       { hostname: 'localhost', port: '1323', username: 'default', password: 'default' };
     const currentNamespace = window.parent?.configNamespace || 'default';
-    const url = `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug/ns/${currentNamespace}` +
+    const url = `${tbApiBase()}/ns/${currentNamespace}` +
       `/infra/${encodeURIComponent(infraId)}/node/${encodeURIComponent(nodeId)}?detail=true`;
     const response = await axios({
       method: 'GET',
@@ -4378,7 +4387,7 @@ function scaleNodeGroup(clusterId, nodeGroupName) {
         const currentNamespace = window.parent?.configNamespace || 'default';
         
         // Call CB-Tumblebug API
-        const url = `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug/ns/${currentNamespace}/k8sCluster/${clusterId}/k8sNodeGroup/${nodeGroupName}/autoscaleSize`;
+        const url = `${tbApiBase()}/ns/${currentNamespace}/k8sCluster/${clusterId}/k8sNodeGroup/${nodeGroupName}/autoscaleSize`;
         
         const response = await fetch(url, {
           method: 'PUT',
@@ -5521,7 +5530,7 @@ async function bulkControlInfra(action) {
 
   showRefreshIndicator(true);
   const tasks = selected.map(infraId => () =>
-    axios.get(`http://${parentConfig.hostname}:${parentConfig.port}/tumblebug/ns/${ns}/control/infra/${infraId}?action=${action}`, {
+    axios.get(`${tbApiBase()}/ns/${ns}/control/infra/${infraId}?action=${action}`, {
       auth: { username: parentConfig.username, password: parentConfig.password },
       timeout: 600000
     })
@@ -5560,7 +5569,7 @@ async function bulkControlNode(action) {
     const cb = document.querySelector(`#nodeTableBody .row-select-checkbox[data-item-id="${CSS.escape(nodeId)}"]`);
     const infraId = cb ? cb.getAttribute('data-infra-id') : null;
     if (!infraId) return null;
-    return () => axios.get(`http://${parentConfig.hostname}:${parentConfig.port}/tumblebug/ns/${ns}/control/infra/${infraId}/node/${nodeId}?action=${action}`, {
+    return () => axios.get(`${tbApiBase()}/ns/${ns}/control/infra/${infraId}/node/${nodeId}?action=${action}`, {
       auth: { username: parentConfig.username, password: parentConfig.password },
       timeout: 600000
     });
@@ -5659,7 +5668,7 @@ async function bulkDeleteItems(tableType) {
         continue;
     }
 
-    tasks.push({ itemId, fn: () => axios({ method: 'DELETE', url: `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug${endpoint}`,
+    tasks.push({ itemId, fn: () => axios({ method: 'DELETE', url: `${tbApiBase()}${endpoint}`,
       headers: { 'X-Credential-Holder': credentialHolder },
       auth: { username: parentConfig.username, password: parentConfig.password }, timeout: 600000
     }) });
@@ -5835,7 +5844,7 @@ async function bulkDeregisterItems(tableType) {
         continue;
     }
 
-    tasks.push({ itemId, fn: () => axios({ method: 'DELETE', url: `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug${endpoint}`,
+    tasks.push({ itemId, fn: () => axios({ method: 'DELETE', url: `${tbApiBase()}${endpoint}`,
       headers: { 'X-Credential-Holder': credentialHolder },
       auth: { username: parentConfig.username, password: parentConfig.password }, timeout: 60000
     }) });

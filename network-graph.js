@@ -1454,8 +1454,14 @@ function showDetail(node) {
 
 function ngApiBase() {
   const cfg = (window.getConfig && window.getConfig()) || {};
+  // Prefer the gateway/base URL origin over the direct host:port (unreachable from
+  // the browser when mapui is served via a gateway). Callers append a path that
+  // already includes /tumblebug, so strip it from apiBaseUrl to avoid doubling.
+  const base = cfg.apiBaseUrl
+    ? cfg.apiBaseUrl.replace(/\/tumblebug\/?$/, '')
+    : `http://${cfg.hostname}:${cfg.port}`;
   return {
-    hostname: cfg.hostname, port: cfg.port,
+    hostname: cfg.hostname, port: cfg.port, base,
     username: cfg.username, password: cfg.password,
     ns: window.configNamespace,
   };
@@ -1468,7 +1474,7 @@ function subnetMembers(subnetNode) {
 }
 
 async function removeBastionViaApi(infraId, bastionNodeId, bastionNsId, bastionInfraId) {
-  const { hostname, port, username, password, ns } = ngApiBase();
+  const { base, username, password, ns } = ngApiBase();
   if (!ns || !infraId) {
     Swal.fire({ icon: 'error', title: 'Missing namespace / Infra context' });
     return;
@@ -1497,7 +1503,7 @@ async function removeBastionViaApi(infraId, bastionNodeId, bastionNsId, bastionI
   if (!confirm.isConfirmed) return;
 
   try {
-    const res = await fetch(`http://${hostname}:${port}${path}`, {
+    const res = await fetch(`${base}${path}`, {
       method: 'DELETE',
       headers: { Authorization: 'Basic ' + btoa(`${username}:${password}`) },
     });

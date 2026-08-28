@@ -261,6 +261,10 @@ function getConfig() {
   return {
     hostname: configHostname,
     port: configPort,
+    // Gateway/base URL override (e.g. https://host/tumblebug). When set, callers
+    // must prefer this over hostname:port so requests go through the gateway
+    // instead of the direct TB port, which may be unreachable from the browser.
+    apiBaseUrl: configApiBaseUrl,
     username: configUsername,
     password: configPassword,
     credentialHolder: configCredentialHolder,
@@ -4308,7 +4312,7 @@ const ACTIVITY_MAX = 6;                 // cards kept on screen
 const ACTIVITY_MCP_LIFETIME_MS = 20000; // MCP event card auto-expire
 const ACTIVITY_GUI_DONE_MS = 5000;      // GUI card lingers after it completes
 const mcpBannerSeen = new Set();        // startTime+url, so an MCP request is shown once
-const guiActivityCards = new Map();     // taskId -> live GUI card element
+const guiActivityCards = new globalThis.Map(); // taskId -> live card ('Map' is shadowed by ol/Map)
 
 // Unified activity feed (top-right): API work in progress, whether triggered from
 // the map GUI (source 'gui') or arriving from an agent via MCP (source 'mcp').
@@ -14844,7 +14848,7 @@ window.nlbDoCreate = async () => {
   };
   const s = addSpinnerTask("Creating Regional NLB");
   try {
-    await axios({ method: 'post', url: `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.infraid}/nlb`, headers: { 'Content-Type': 'application/json' }, data: body, auth: { username: c.username, password: c.password } });
+    await axios({ method: 'post', url: `${tbApiBase()}/ns/${c.namespace}/infra/${c.infraid}/nlb`, headers: { 'Content-Type': 'application/json' }, data: body, auth: { username: c.username, password: c.password } });
     successAlert("Regional NLB created");
     getInfra();
     window.nlbManagerRefresh();
@@ -14858,7 +14862,7 @@ window.nlbDoDelete = async (nlbId) => {
   if (!r.isConfirmed) return;
   const s = addSpinnerTask("Deleting NLB");
   try {
-    await axios({ method: 'delete', url: `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.infraid}/nlb/${nlbId}`, auth: { username: c.username, password: c.password } });
+    await axios({ method: 'delete', url: `${tbApiBase()}/ns/${c.namespace}/infra/${c.infraid}/nlb/${nlbId}`, auth: { username: c.username, password: c.password } });
     successAlert("NLB deleted");
     getInfra();
     window.nlbManagerRefresh();
@@ -14868,7 +14872,7 @@ window.nlbDoDelete = async (nlbId) => {
 
 // Fetch live health (Spider call) for an NLB → {healthy, unhealthy, all}.
 async function nlbFetchHealth(c, nlbId) {
-  const res = await axios({ method: 'get', url: `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.infraid}/nlb/${nlbId}/healthz`, auth: { username: c.username, password: c.password } });
+  const res = await axios({ method: 'get', url: `${tbApiBase()}/ns/${c.namespace}/infra/${c.infraid}/nlb/${nlbId}/healthz`, auth: { username: c.username, password: c.password } });
   const h = res.data || {};
   return {
     healthy: h.healthyNodes || h.HealthyNodes || [],
@@ -14936,7 +14940,7 @@ window.nlbAddNode = async (nlbId) => {
   const c = window._nlbCtx; if (!c) return;
   let nodes = [];
   try {
-    const res = await axios({ method: 'get', url: `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.infraid}`, auth: { username: c.username, password: c.password } });
+    const res = await axios({ method: 'get', url: `${tbApiBase()}/ns/${c.namespace}/infra/${c.infraid}`, auth: { username: c.username, password: c.password } });
     nodes = (res.data && res.data.node || []).map(n => n.id);
   } catch (e) { /* ignore */ }
   if (!nodes.length) { errorAlert("No nodes available in this Infra"); return; }
@@ -14948,7 +14952,7 @@ window.nlbAddNode = async (nlbId) => {
   if (!nodeId) return;
   const s = addSpinnerTask("Adding node to NLB");
   try {
-    await axios({ method: 'post', url: `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.infraid}/nlb/${nlbId}/node`, headers: { 'Content-Type': 'application/json' }, data: { targetGroup: { nodes: [nodeId] } }, auth: { username: c.username, password: c.password } });
+    await axios({ method: 'post', url: `${tbApiBase()}/ns/${c.namespace}/infra/${c.infraid}/nlb/${nlbId}/node`, headers: { 'Content-Type': 'application/json' }, data: { targetGroup: { nodes: [nodeId] } }, auth: { username: c.username, password: c.password } });
     successAlert("Node added to NLB");
     window.nlbManagerRefresh();
   } catch (e) { errorAlert("Add node failed: " + (e.response?.data?.message || e.message)); }
@@ -14961,7 +14965,7 @@ window.nlbRemoveNode = async (nlbId, nodeId) => {
   if (!r.isConfirmed) return;
   const s = addSpinnerTask("Removing node from NLB");
   try {
-    await axios({ method: 'delete', url: `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.infraid}/nlb/${nlbId}/node`, headers: { 'Content-Type': 'application/json' }, data: { targetGroup: { nodes: [nodeId] } }, auth: { username: c.username, password: c.password } });
+    await axios({ method: 'delete', url: `${tbApiBase()}/ns/${c.namespace}/infra/${c.infraid}/nlb/${nlbId}/node`, headers: { 'Content-Type': 'application/json' }, data: { targetGroup: { nodes: [nodeId] } }, auth: { username: c.username, password: c.password } });
     successAlert("Node removed from NLB");
     window.nlbManagerRefresh();
   } catch (e) { errorAlert("Remove node failed: " + (e.response?.data?.message || e.message)); }
@@ -15136,7 +15140,7 @@ window.vpnCreate = async () => {
   Swal.close();
   const sp = addSpinnerTask(`Creating VPN '${name}' (15–45 min)…`);
   try {
-    await axios({ method: 'post', url: `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.infraid}/vpn`, headers: { 'Content-Type': 'application/json' }, data: body, auth: { username: c.username, password: c.password }, timeout: 3600000 });
+    await axios({ method: 'post', url: `${tbApiBase()}/ns/${c.namespace}/infra/${c.infraid}/vpn`, headers: { 'Content-Type': 'application/json' }, data: body, auth: { username: c.username, password: c.password }, timeout: 3600000 });
     successAlert(`VPN '${name}' created`);
     getInfra();
   } catch (e) { errorAlert("Create VPN failed: " + (e.response?.data?.message || e.message)); }
@@ -15149,7 +15153,7 @@ window.vpnDelete = async (vpnId, reconcile) => {
   if (!r.isConfirmed) return;
   const sp = addSpinnerTask(reconcile ? "Reconciling VPN…" : "Deleting VPN (may take minutes)…");
   try {
-    const url = `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.infraid}/vpn/${vpnId}${reconcile ? '?option=reconcile' : ''}`;
+    const url = `${tbApiBase()}/ns/${c.namespace}/infra/${c.infraid}/vpn/${vpnId}${reconcile ? '?option=reconcile' : ''}`;
     await axios({ method: 'delete', url, auth: { username: c.username, password: c.password }, timeout: 3600000 });
     successAlert(reconcile ? "VPN reconciled" : "VPN deleted");
     getInfra();
@@ -15163,7 +15167,7 @@ window.vpnHealth = async (vpnId, idx) => {
   const div = document.getElementById(`vpn-health-${idx}`);
   if (div) div.innerHTML = '<span class="popup-hint">Running ping test through the tunnel…</span>';
   try {
-    const res = await axios({ method: 'post', url: `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.infraid}/vpn/${vpnId}/health`, headers: { 'Content-Type': 'application/json' }, data: {}, auth: { username: c.username, password: c.password }, timeout: 300000 });
+    const res = await axios({ method: 'post', url: `${tbApiBase()}/ns/${c.namespace}/infra/${c.infraid}/vpn/${vpnId}/health`, headers: { 'Content-Type': 'application/json' }, data: {}, auth: { username: c.username, password: c.password }, timeout: 300000 });
     const h = res.data || {};
     const e2 = (v) => window.escapeHtml(String(v == null ? '' : v));
     const rows = (h.results || []).map(r => `<div>${r.reachable ? '✅' : '❌'} ${e2(r.direction)}: ${e2(r.message || '')}</div>`).join('');
@@ -15177,7 +15181,7 @@ window.vpnRefresh = async (vpnId) => {
   const c = window._vpnCtx; if (!c) return;
   const sp = addSpinnerTask("Refreshing VPN from CSP…");
   try {
-    await axios({ method: 'get', url: `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.infraid}/vpn/${vpnId}?refresh=true`, auth: { username: c.username, password: c.password }, timeout: 120000 });
+    await axios({ method: 'get', url: `${tbApiBase()}/ns/${c.namespace}/infra/${c.infraid}/vpn/${vpnId}?refresh=true`, auth: { username: c.username, password: c.password }, timeout: 120000 });
     window.vpnManagerRefresh();
   } catch (e) { errorAlert("Refresh failed: " + (e.response?.data?.message || e.message)); }
   finally { removeSpinnerTask(sp); }
@@ -15273,7 +15277,7 @@ window.mcnlbCreate = async () => {
   Swal.close();
   const sp = addSpinnerTask("Creating Global NLB (VM cluster + HAProxy)…");
   try {
-    await axios({ method: 'post', url: `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.targetInfraId}/mcSwNlb`, headers: { 'Content-Type': 'application/json' }, data: body, auth: { username: c.username, password: c.password }, timeout: 3600000 });
+    await axios({ method: 'post', url: `${tbApiBase()}/ns/${c.namespace}/infra/${c.targetInfraId}/mcSwNlb`, headers: { 'Content-Type': 'application/json' }, data: body, auth: { username: c.username, password: c.password }, timeout: 3600000 });
     successAlert("Global NLB created");
     getInfra();
   } catch (e) { errorAlert("Create Global NLB failed: " + (e.response?.data?.message || e.message)); }
@@ -15286,7 +15290,7 @@ window.mcnlbDelete = async () => {
   if (!r.isConfirmed) return;
   const sp = addSpinnerTask("Deleting Global NLB host…");
   try {
-    await axios({ method: 'delete', url: `http://${c.hostname}:${c.port}/tumblebug/ns/${c.namespace}/infra/${c.hostInfraId}?option=terminate`, auth: { username: c.username, password: c.password }, timeout: 1800000 });
+    await axios({ method: 'delete', url: `${tbApiBase()}/ns/${c.namespace}/infra/${c.hostInfraId}?option=terminate`, auth: { username: c.username, password: c.password }, timeout: 1800000 });
     successAlert("Global NLB deleted");
     getInfra();
     window.mcnlbManagerRefresh();
@@ -18894,7 +18898,7 @@ function startStreamingSession(streamUrl, username, password, xRequestId, infraI
       const ns = cfg.namespace || window.configNamespace;
       if (!cfg.hostname || !cfg.port || !ns || !infraId) return;
       const res = await axios.get(
-        `http://${cfg.hostname}:${cfg.port}/tumblebug/ns/${ns}/infra/${infraId}`,
+        `${tbApiBase()}/ns/${ns}/infra/${infraId}`,
         { auth: { username: cfg.username, password: cfg.password } }
       );
       const nodes = (res.data && res.data.node) || [];
@@ -19061,7 +19065,7 @@ function _cmdCancelNodeTask(session, nodeId) {
   // strings and ':' is a legal path character, so no URL encoding — this also
   // keeps compatibility with Tumblebug versions that don't unescape the param.
   const taskId = `${session.xRequestId}:${nodeId}:${nd.commandIndex}`;
-  const url = `http://${cfg.hostname}:${cfg.port}/tumblebug/ns/${ns}/cmd/infra/${session.infraId}/task/${taskId}/cancel`;
+  const url = `${tbApiBase()}/ns/${ns}/cmd/infra/${session.infraId}/task/${taskId}/cancel`;
   axios.post(url, { reason: 'Cancelled from streaming view' }, {
     auth: { username: cfg.username, password: cfg.password },
     timeout: 15000,
@@ -27681,7 +27685,7 @@ async function showDnsManagementModal(preselectedInfraId) {
         if (labelContainer) labelContainer.innerHTML = '<span style="color: #999; font-size: 11px;"><i class="fas fa-spinner fa-spin"></i> Loading labels...</span>';
         try {
           var nsId = document.getElementById('dns-infra-nsid').value.trim();
-          var infraDetailUrl = 'http://' + config.hostname + ':' + config.port + '/tumblebug/ns/' + nsId + '/infra/' + infraId;
+          var infraDetailUrl = tbApiBase() + '/ns/' + nsId + '/infra/' + infraId;
           var resp = await axios.get(infraDetailUrl, { auth: { username: config.username, password: config.password }, timeout: 15000 });
           var infraDetail = resp.data;
           if (infraDetail && infraDetail.node) {
@@ -27706,7 +27710,7 @@ async function showDnsManagementModal(preselectedInfraId) {
         selectEl.innerHTML = '<option value="">Loading...</option>';
         if (!nsId) { selectEl.innerHTML = '<option value="">(No namespace)</option>'; return; }
         try {
-          var infraUrl = 'http://' + config.hostname + ':' + config.port + '/tumblebug/ns/' + nsId + '/infra?option=id';
+          var infraUrl = tbApiBase() + '/ns/' + nsId + '/infra?option=id';
           const infraResp = await axios.get(infraUrl, {
             auth: { username: config.username, password: config.password }, timeout: 15000
           });
@@ -28057,7 +28061,7 @@ async function showGatewayModal(preselectedInfraId) {
   const cfg  = getConfig();
   const ns   = configNamespace || 'default';
   const auth = { username: cfg.username, password: cfg.password };
-  const base = `http://${cfg.hostname}:${cfg.port}/tumblebug`;
+  const base = `${tbApiBase()}`;
 
   let infraList = [];
   try {
@@ -28911,7 +28915,7 @@ function submitAutopilotReview() {
     req.name + '</strong>...</p></div>');
   document.getElementById('apProvisionNowBtn').disabled = true;
 
-  var url = 'http://' + configHostname + ':' + configPort + '/tumblebug/ns/' + configNamespace + '/infraAutopilotReview';
+  var url = tbApiBase() + '/ns/' + configNamespace + '/infraAutopilotReview';
   var requestId = generateRandomRequestId('ap-review-', 10);
 
   axios({
@@ -29083,7 +29087,7 @@ function proceedWithAutopilotProvision() {
     _apShowProgressPanel('Autopilot: ' + req.name);
   }, 350);
 
-  var url = 'http://' + configHostname + ':' + configPort + '/tumblebug/ns/' + configNamespace + '/infraAutopilot';
+  var url = tbApiBase() + '/ns/' + configNamespace + '/infraAutopilot';
   var requestId = generateRandomRequestId('autopilot-', 10);
   var spinnerId = addSpinnerTask('Autopilot: ' + req.name);
   _apPollingStop = false;
@@ -29120,7 +29124,7 @@ function proceedWithAutopilotProvision() {
 }
 
 function _apPollStatus(infraId) {
-  var url = 'http://' + configHostname + ':' + configPort + '/tumblebug/ns/' + configNamespace +
+  var url = tbApiBase() + '/ns/' + configNamespace +
             '/infraAutopilot/' + infraId + '/status';
   axios({
     method: 'get', url: url,
