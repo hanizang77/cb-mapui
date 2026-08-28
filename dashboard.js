@@ -2516,12 +2516,36 @@ async function viewInfraDetails(infraId) {
 
 // View Node details
 async function viewNodeDetails(infraId, nodeId) {
+  // The infra list is a lightweight/status view (status, IP, provider, region, specId).
+  // Fetch the full node object for the detail popup so static config — full spec/image,
+  // network (vNet/subnet/SG), disk, sshKey, connectionConfig, plus CSP addtionalDetails
+  // (detail=true) — is complete.
+  try {
+    const parentConfig = window.parent?.getConfig?.() ||
+      { hostname: 'localhost', port: '1323', username: 'default', password: 'default' };
+    const currentNamespace = window.parent?.configNamespace || 'default';
+    const url = `http://${parentConfig.hostname}:${parentConfig.port}/tumblebug/ns/${currentNamespace}` +
+      `/infra/${encodeURIComponent(infraId)}/node/${encodeURIComponent(nodeId)}?detail=true`;
+    const response = await axios({
+      method: 'GET',
+      url,
+      auth: { username: parentConfig.username, password: parentConfig.password },
+      timeout: 30000
+    });
+    if (response && response.data) {
+      showJsonDetailsPopup(`💻 Node Details: ${nodeId}`, response.data);
+      return;
+    }
+  } catch (e) {
+    console.warn('Node detail fetch failed; using cached list data', e);
+  }
+
+  // Fallback: cached (lightweight) node data from the list poll
   const nd = nodeData.find(v => v.infraId === infraId && v.id === nodeId);
   if (!nd) {
     showErrorMessage('Node not found');
     return;
   }
-  
   showJsonDetailsPopup(`💻 Node Details: ${nodeId}`, nd);
 }
 
