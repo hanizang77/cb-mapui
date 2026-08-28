@@ -3556,10 +3556,18 @@ function _getGraphApiConfig() {
   return {
     hostname: cfg.hostname || 'localhost',
     port: cfg.port || '1323',
+    apiBaseUrl: cfg.apiBaseUrl || '',
     username: cfg.username || 'default',
     password: cfg.password || 'default',
     credentialHolder: cfg.credentialHolder || 'admin'
   };
+}
+
+// Prefer the parent's gateway/base URL (apiBaseUrl) over the direct host:port,
+// which may be unreachable from the browser when mapui is served via a gateway.
+function _graphApiBase() {
+  const cfg = _getGraphApiConfig();
+  return cfg.apiBaseUrl || `http://${cfg.hostname}:${cfg.port}/tumblebug`;
 }
 
 function _graphDeregisterEndpoint(type, resourceId, infraId, ns) {
@@ -3633,7 +3641,7 @@ async function performGraphDeregister(type, resourceId, infraId) {
     Swal.fire({ title: 'Deregistering...', allowOutsideClick: true, didOpen: () => Swal.showLoading() });
     await axios({
       method: 'DELETE',
-      url: `http://${cfg.hostname}:${cfg.port}/tumblebug${endpoint}`,
+      url: `${_graphApiBase()}${endpoint}`,
       headers: { 'X-Credential-Holder': cfg.credentialHolder },
       auth: { username: cfg.username, password: cfg.password },
       timeout: 60000
@@ -3679,7 +3687,7 @@ async function performGraphDelete(type, resourceId, infraId) {
     Swal.fire({ title: 'Deleting...', allowOutsideClick: true, didOpen: () => Swal.showLoading() });
     await axios({
       method: 'DELETE',
-      url: `http://${cfg.hostname}:${cfg.port}/tumblebug${endpoint}`,
+      url: `${_graphApiBase()}${endpoint}`,
       headers: { 'X-Credential-Holder': cfg.credentialHolder },
       auth: { username: cfg.username, password: cfg.password },
       timeout: 120000
