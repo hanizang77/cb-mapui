@@ -373,6 +373,7 @@ function showMapRefreshIndicator(show) {
 }
 
 function updateRunningCostDisplay(infraList) {
+  hudChipsContainer(); // adopt the cost pill into the shared bottom-right chip stack
   const el = document.getElementById('running-cost-display');
   const valEl = document.getElementById('running-cost-value');
   const badgeEl = document.getElementById('running-cost-unknown-badge');
@@ -1389,37 +1390,20 @@ function generateSpinnerId(functionName) {
   return "[" + currentSpinnerId + "] " + functionName; // Return the unique task ID
 }
 
-// Function to add a new task to the spinner stack and update the spinner's visibility
+// Add a task: render a live "GUI" card in the unified activity feed (top-right).
+// The taskId/return contract is unchanged, so existing call sites are untouched.
 function addSpinnerTask(functionName) {
-  const taskId = generateSpinnerId(functionName); // Create a unique task ID
-  spinnerStack[taskId] = true; // Add the task to the stack
-  updateSpinnerVisibility(); // Update the spinner display
-  return taskId; // Return the task ID for later reference
+  const taskId = generateSpinnerId(functionName);
+  spinnerStack[taskId] = true;
+  guiActivityStart(taskId, functionName); // defined in the activity-feed module below
+  return taskId;
 }
 
-// Function to remove a task from the spinner stack by its ID and update the spinner's visibility
+// Remove a task: mark its activity card done so it settles and fades out.
+// guiActivityEnd is idempotent, so this is safe to call more than once per task.
 function removeSpinnerTask(taskId) {
-  if (spinnerStack[taskId]) {
-    delete spinnerStack[taskId]; // Remove the task from the stack
-    updateSpinnerVisibility(); // Update the spinner display
-  }
-}
-
-// Function to update the spinner's visibility based on the active tasks in the stack
-function updateSpinnerVisibility() {
-  const spinnerContainer = document.getElementById("spinner-container"); // Get the spinner container element
-  const spinnerText = document.getElementById("spinner-text"); // Get the spinner text element
-
-  // Check if there are any tasks remaining in the stack
-  const tasksRemaining = Object.keys(spinnerStack).length > 0;
-
-  if (tasksRemaining) {
-    spinnerContainer.style.display = "flex"; // If there are tasks, display the spinner
-    // Update the spinner text to show all active task names
-    spinnerText.textContent = Object.keys(spinnerStack).join(",  ");
-  } else {
-    spinnerContainer.style.display = "none"; // If no tasks, hide the spinner
-  }
+  delete spinnerStack[taskId];
+  guiActivityEnd(taskId, true);
 }
 
 // Display Icon for Cloud locations
@@ -1661,7 +1645,31 @@ function tombstoneList() {
   return out;
 }
 
-// Show/update a bottom banner when tombstones exist; clicking opens the review dialog.
+// Bottom-right HUD: persistent state chips (running cost, pending-deletion), stacked.
+// Adopts the running-cost pill (defined statically in index.html) so both chips
+// share one corner and stack/hide cleanly via flexbox.
+function hudChipsContainer() {
+  let el = document.getElementById("hud-chips");
+  if (el) return el;
+  el = document.createElement("div");
+  el.id = "hud-chips";
+  el.style.cssText =
+    "position:fixed;bottom:20px;right:20px;z-index:1000;display:flex;" +
+    "flex-direction:column;align-items:flex-end;gap:8px;pointer-events:none;";
+  document.body.appendChild(el);
+  const cost = document.getElementById("running-cost-display");
+  if (cost && cost.parentElement !== el) {
+    cost.style.position = "static";
+    cost.style.bottom = cost.style.right = "auto";
+    cost.style.order = "2"; // keep cost at the bottom of the stack
+    cost.style.pointerEvents = "auto";
+    el.appendChild(cost);
+  }
+  return el;
+}
+
+// Show/update a pending-deletion chip (bottom-right, above cost) when tombstones
+// exist; clicking opens the review dialog. Full wording lives in the tooltip.
 function updateTombstoneBanner() {
   const list = tombstoneList();
   let banner = document.getElementById("tombstoneBanner");
@@ -1673,14 +1681,15 @@ function updateTombstoneBanner() {
     banner = document.createElement("div");
     banner.id = "tombstoneBanner";
     banner.style.cssText =
-      "position:absolute;bottom:20px;left:50%;transform:translateX(-50%);z-index:1000;" +
-      "background:#fb7185;color:#fff;border-radius:20px;padding:8px 16px;cursor:pointer;" +
-      "box-shadow:0 4px 12px rgba(0,0,0,0.2);font-size:13px;font-weight:600;";
+      "order:1;background:#fb7185;color:#fff;border-radius:10px;padding:8px 14px;" +
+      "cursor:pointer;pointer-events:auto;box-shadow:0 4px 14px rgba(0,0,0,0.18);" +
+      "font-size:13px;font-weight:600;display:flex;align-items:center;gap:5px;white-space:nowrap;";
+    banner.title = "Resources pending deletion — click to review & force-purge";
     banner.onclick = showTombstoneReview;
-    document.body.appendChild(banner);
+    hudChipsContainer().appendChild(banner);
   }
-  banner.style.display = "block";
-  banner.textContent = "⏳ " + list.length + " resource(s) pending deletion — review & purge";
+  banner.style.display = "flex";
+  banner.innerHTML = '🗑 <b>' + list.length + '</b> pending';
 }
 
 // Dialog listing tombstoned resources, each with a Force purge action.
@@ -4295,18 +4304,23 @@ function handleInfraWithoutNodes(infraItem) {
 // a credential registration carries its secret there.
 // ---------------------------------------------------------------------------
 
-const MCP_BANNER_MAX = 6;          // entries kept on screen
-const MCP_BANNER_LIFETIME_MS = 20000;
-const mcpBannerSeen = new Set();   // startTime+url, so a request is shown once
+const ACTIVITY_MAX = 6;                 // cards kept on screen
+const ACTIVITY_MCP_LIFETIME_MS = 20000; // MCP event card auto-expire
+const ACTIVITY_GUI_DONE_MS = 5000;      // GUI card lingers after it completes
+const mcpBannerSeen = new Set();        // startTime+url, so an MCP request is shown once
+const guiActivityCards = new Map();     // taskId -> live GUI card element
 
-function mcpBannerContainer() {
-  let el = document.getElementById('mcp-activity-banner');
+// Unified activity feed (top-right): API work in progress, whether triggered from
+// the map GUI (source 'gui') or arriving from an agent via MCP (source 'mcp').
+function activityFeedContainer() {
+  let el = document.getElementById('activity-feed');
   if (el) return el;
   el = document.createElement('div');
-  el.id = 'mcp-activity-banner';
+  el.id = 'activity-feed';
   el.style.cssText = [
-    'position:fixed', 'top:84px', 'right:16px', 'z-index:9998',
-    'width:340px', 'display:flex', 'flex-direction:column', 'gap:8px',
+    // Below swal2 popups (1060) so dialogs always show above the feed, above map controls (1000).
+    'position:fixed', 'top:84px', 'right:16px', 'z-index:1050',
+    'width:250px', 'display:flex', 'flex-direction:column', 'gap:6px',
     'pointer-events:none', 'font-family:system-ui,-apple-system,sans-serif',
   ].join(';');
   document.body.appendChild(el);
@@ -4314,39 +4328,124 @@ function mcpBannerContainer() {
 }
 
 // Destructive work should not look like everything else on the way past.
-const MCP_METHOD_COLOR = { GET: '#9fb3c8', POST: '#61dafb', PUT: '#f0b429', DELETE: '#ff6b6b' };
+const ACTIVITY_METHOD_COLOR = { GET: '#9fb3c8', POST: '#61dafb', PUT: '#f0b429', DELETE: '#ff6b6b' };
+const ACTIVITY_SRC = {
+  mcp: { tag: 'MCP', badge: '#61dafb' },
+  gui: { tag: 'GUI', badge: '#7fd6a0' },
+};
 
-function mcpBannerAdd(entry) {
-  const box = mcpBannerContainer();
+// Build and mount a feed card. Returns the element so live (GUI) cards can be updated.
+// opts: { source, method?, text, status, ok?, live? }
+function activityCardAdd(opts) {
+  const box = activityFeedContainer();
+  const src = ACTIVITY_SRC[opts.source] || ACTIVITY_SRC.gui;
+  const ok = opts.ok !== false;
+  const accent = !ok ? '#ff6b6b'
+    : (opts.method ? (ACTIVITY_METHOD_COLOR[opts.method] || src.badge) : src.badge);
   const card = document.createElement('div');
-  const ok = String(entry.status).toLowerCase() !== 'error';
-  const accent = ok ? (MCP_METHOD_COLOR[entry.method] || '#61dafb') : '#ff6b6b';
   card.style.cssText = [
     'background:rgba(13,27,42,.94)', 'border:1px solid ' + (ok ? '#2a5c8a' : '#8a2a2a'),
-    'border-left:4px solid ' + accent,
-    'border-radius:8px', 'padding:10px 12px', 'color:#e8eef6', 'font-size:12px',
-    'box-shadow:0 4px 14px rgba(0,0,0,.45)', 'opacity:0',
+    'border-left:3px solid ' + accent,
+    'border-radius:7px', 'padding:7px 9px', 'color:#e8eef6', 'font-size:11px',
+    'box-shadow:0 3px 10px rgba(0,0,0,.4)', 'opacity:0',
     'transition:opacity .25s ease, transform .25s ease', 'transform:translateX(12px)',
   ].join(';');
+  const statusColor = opts.live ? '#61dafb' : (ok ? '#7fd6a0' : '#ff9b9b');
   card.innerHTML =
     '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
-      '<span style="background:' + accent + ';color:#0d1b2a;font-weight:700;border-radius:4px;' +
-      'padding:1px 6px;font-size:10px;letter-spacing:.04em;">MCP</span>' +
-      '<span style="color:' + accent + ';font-weight:600;">' + window.escapeHtml(entry.method) + '</span>' +
-      '<span style="margin-left:auto;color:' + (ok ? '#7fd6a0' : '#ff9b9b') + ';">' +
-      window.escapeHtml(entry.status) + '</span>' +
+      '<span style="background:' + src.badge + ';color:#0d1b2a;font-weight:700;border-radius:4px;' +
+      'padding:1px 6px;font-size:10px;letter-spacing:.04em;">' + src.tag + '</span>' +
+      (opts.method ? '<span style="color:' + accent + ';font-weight:600;">' +
+        window.escapeHtml(opts.method) + '</span>' : '') +
+      '<span class="af-status" style="margin-left:auto;color:' + statusColor + ';">' +
+      window.escapeHtml(opts.status || '') + '</span>' +
     '</div>' +
     '<div style="color:#c3cfe2;word-break:break-all;line-height:1.35;">' +
-      window.escapeHtml(entry.url) + '</div>';
+      window.escapeHtml(opts.text || '') + '</div>';
   box.appendChild(card);
   requestAnimationFrame(() => { card.style.opacity = '1'; card.style.transform = 'translateX(0)'; });
+  while (box.children.length > ACTIVITY_MAX) box.removeChild(box.firstChild);
+  return card;
+}
 
-  while (box.children.length > MCP_BANNER_MAX) box.removeChild(box.firstChild);
+function activityCardExpire(card, delay) {
   setTimeout(() => {
     card.style.opacity = '0';
     card.style.transform = 'translateX(12px)';
     setTimeout(() => card.remove(), 300);
-  }, MCP_BANNER_LIFETIME_MS);
+  }, delay);
+}
+
+// Infer the HTTP method from a GUI action label so cards share the MCP feed's
+// method colour language (POST/PUT/GET/DELETE) instead of a single flat colour.
+// The label is all the spinner API gives us; this keeps call sites untouched.
+function guiMethodFromLabel(label) {
+  const s = String(label).toLowerCase();
+  if (/delet|remov|purge|terminat|destroy|release/.test(s)) return 'DELETE';
+  if (/updat|set |setting|reconcil|edit|modif|refresh|scale|bastion|attach|detach/.test(s)) return 'PUT';
+  if (/load|list|fetch|check|review|extract|copy|get |getting|read/.test(s)) return 'GET';
+  return 'POST'; // create/add/build/save/run/command/deploy default
+}
+
+// GUI: a user action started — live card that stays until the action ends.
+// The card is tagged with its taskId so both the direct end path and the
+// reconcile safety net can find and settle it.
+function guiActivityStart(taskId, label) {
+  // No 'running' text: a visible card already means in-progress. Only errors are
+  // labelled (in settleGuiCard); success just fades out.
+  const card = activityCardAdd({
+    source: 'gui', method: guiMethodFromLabel(label), text: label, status: '', live: true,
+  });
+  card.dataset.taskId = taskId;
+  card.dataset.live = '1';
+  guiActivityCards.set(taskId, card);
+}
+
+// Settle a live GUI card to done/error, then fade it out. Idempotent.
+function settleGuiCard(card, ok) {
+  if (!card || card.dataset.live !== '1') return;
+  card.dataset.live = '0';
+  // Success just fades out (keeping its method colour); only errors are labelled.
+  if (!ok) {
+    const st = card.querySelector('.af-status');
+    if (st) { st.textContent = 'error'; st.style.color = '#ff9b9b'; }
+    card.style.borderLeftColor = '#ff6b6b';
+  }
+  activityCardExpire(card, ACTIVITY_GUI_DONE_MS);
+}
+
+// GUI: the action finished — settle its card.
+function guiActivityEnd(taskId, ok) {
+  const card = guiActivityCards.get(taskId);
+  guiActivityCards.delete(taskId);
+  settleGuiCard(card, ok);
+}
+
+// Safety net: settle any live GUI card whose task is no longer active in
+// spinnerStack (the authoritative set). Guards against a completed task whose
+// card was not settled by the direct end path. A still-running task stays in
+// spinnerStack, so long operations (e.g. VPN create) keep their card correctly.
+function reconcileGuiActivity() {
+  const box = document.getElementById('activity-feed');
+  if (!box) return;
+  box.querySelectorAll('[data-task-id][data-live="1"]').forEach((card) => {
+    if (!spinnerStack[card.dataset.taskId]) settleGuiCard(card, true);
+  });
+}
+setInterval(reconcileGuiActivity, 3000);
+
+// MCP: an agent-origin request observed in the TB request log (point-in-time event).
+// Kept named mcpBannerAdd so pollExternalRequests is unchanged.
+function mcpBannerAdd(entry) {
+  const ok = String(entry.status).toLowerCase() !== 'error';
+  const card = activityCardAdd({
+    source: 'mcp',
+    method: String(entry.method || '').toUpperCase(),
+    text: entry.url,
+    status: entry.status,
+    ok,
+  });
+  activityCardExpire(card, ACTIVITY_MCP_LIFETIME_MS);
 }
 
 async function pollExternalRequests() {
