@@ -10329,6 +10329,7 @@ function getRecommendedSpec(idx, latitude, longitude) {
                     }
                     if (result.suggestedSystemDisk && (rdtSelect.value === 'default' || rdtSelect.value === '')) {
                       rdtSelect.value = result.suggestedSystemDisk;
+                      rdtSelect.dispatchEvent(new Event('change')); // refresh size hint for the suggested type
                     }
                   }
 
@@ -10377,7 +10378,20 @@ function getRecommendedSpec(idx, latitude, longitude) {
               };
 
               // Populate RootDiskType dropdown based on CSP (using common helper)
-              populateRootDiskTypeSelect('rootDiskTypeSelect', selectedSpec.providerName, selectedSpec.rootDiskType || 'default');
+              const imageIdForDisk = () => {
+                const sel = document.getElementById('osImageSelect');
+                if (sel && sel.value) return sel.value;
+                return createInfraReqVm.imageId || (typeof selectedImage !== 'undefined' && selectedImage ? selectedImage.cspImageName : '') || '';
+              };
+              const rootDiskPopulatePromise = populateRootDiskTypeSelect('rootDiskTypeSelect', selectedSpec, selectedSpec.rootDiskType || 'default',
+                { sizeInputId: 'rootDiskSizeCustom', hintId: 'rootDiskSizeHint', imageId: imageIdForDisk });
+              const osSelForHint = document.getElementById('osImageSelect');
+              if (osSelForHint) osSelForHint.addEventListener('change', () => {
+                // Image changed: re-query (OS / minimum root size differ per image), keeping the chosen type.
+                const cur = document.getElementById('rootDiskTypeSelect');
+                populateRootDiskTypeSelect('rootDiskTypeSelect', selectedSpec, cur ? cur.value : 'default',
+                  { sizeInputId: 'rootDiskSizeCustom', hintId: 'rootDiskSizeHint', imageId: imageIdForDisk });
+              });
 
               // Fetch and populate Zone dropdown using the new availableZonesForSpec API (GET method)
               const zonePopulatePromise = populateZoneSelect('zoneSelect', 'zoneLoadingSpinner', selectedSpec.id, '', 'zoneStatusMessage');
@@ -10513,6 +10527,11 @@ function getRecommendedSpec(idx, latitude, longitude) {
               if (rootDiskSizeValue !== "" && rootDiskSizeValue !== "0") {
                 if (!/^\d+$/.test(rootDiskSizeValue)) {
                   Swal.showValidationMessage('Disk size must be empty (default) or a positive number');
+                  return false;
+                }
+                const sizeErr = validateDiskSizeAgainstRule(parseInt(rootDiskSizeValue, 10), getSelectedRootDiskRule(rootDiskTypeSelect));
+                if (sizeErr) {
+                  Swal.showValidationMessage(sizeErr);
                   return false;
                 }
               }
@@ -10700,37 +10719,138 @@ window.editingNodeGroupIndex = -1;
 
 // ========== Common Helper Functions for Spec Configuration Popup ==========
 
-// Root disk type options per CSP (based on cloudos_meta.yaml)
-const ROOT_DISK_TYPES = {
-  'aws': ['default', 'standard', 'gp2', 'gp3'],
-  'azure': ['default', 'PremiumSSD', 'StandardSSD', 'StandardHDD'],
-  'gcp': ['default', 'pd-standard', 'pd-balanced', 'pd-ssd', 'pd-extreme'],
-  'alibaba': ['default', 'cloud_essd', 'cloud_efficiency', 'cloud', 'cloud_ssd'],
-  'tencent': ['default', 'CLOUD_PREMIUM', 'CLOUD_SSD'],
-  'ibm': ['default'],
-  'ncp': ['default', 'SSD', 'HDD'],
-  'nhn': ['default', 'General_HDD', 'General_SSD'],
-  'kt': ['default', 'HDD', 'SSD']
-};
+// Cache of diskOptions responses keyed by specId|imageId (plain object: `Map` here is OpenLayers' Map).
+const diskOptionsCache = {};
 
 /**
- * Populate RootDiskType dropdown based on cloud provider.
- * @param {string} selectId - DOM element ID of the select dropdown
- * @param {string} providerName - Cloud provider name (e.g., 'aws', 'gcp')
- * @param {string} currentValue - Currently selected disk type value
+ * Fetch GET /ns/system/resources/spec/{specId}/diskOptions (CSP-native disk types usable with the spec).
+ * @returns {Promise<object|null>} response body, or null on failure
  */
-function populateRootDiskTypeSelect(selectId, providerName, currentValue) {
+async function fetchSpecDiskOptions(specId, imageId = '') {
+  if (!specId) return null;
+  const cacheKey = `${specId}|${imageId}`;
+  if (cacheKey in diskOptionsCache) return diskOptionsCache[cacheKey];
+  try {
+    // imageId lets the server pick OS-specific root size rules and apply the image's minimum OS disk size.
+    const qs = imageId ? `?imageId=${encodeURIComponent(imageId)}` : '';
+    const resp = await fetch(`${tbApiBase()}/ns/system/resources/spec/${encodeURIComponent(specId)}/diskOptions${qs}`, {
+      headers: { 'Authorization': 'Basic ' + btoa(configUsername + ':' + configPassword) }
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    diskOptionsCache[cacheKey] = data;
+    return data;
+  } catch (e) {
+    console.warn('diskOptions fetch failed:', e);
+    return null;
+  }
+}
+
+/** Human-readable size rule, e.g. "10–65536 GB", "50 / 100 GB", "≥ 50 GB". */
+function formatDiskSizeRule(rule) {
+  if (!rule) return '';
+  if (rule.allowed && rule.allowed.length) return rule.allowed.join(' / ') + ' GB';
+  let txt = '';
+  if (rule.min && rule.max) txt = `${rule.min}–${rule.max} GB`;
+  else if (rule.min) txt = `≥ ${rule.min} GB`;
+  else if (rule.max) txt = `≤ ${rule.max} GB`;
+  if (rule.step && rule.step > 1) txt += ` (step ${rule.step})`;
+  return txt;
+}
+
+/** Validate a size (GB) against a rule; returns '' if ok, else a message. 0/empty = CSP default, always ok. */
+function validateDiskSizeAgainstRule(size, rule) {
+  if (!size || !rule) return '';
+  if (rule.allowed && rule.allowed.length && !rule.allowed.includes(size)) {
+    return `Disk size must be one of ${rule.allowed.join(', ')} GB`;
+  }
+  if (rule.min && size < rule.min) return `Disk size must be at least ${rule.min} GB`;
+  if (rule.max && size > rule.max) return `Disk size must be at most ${rule.max} GB`;
+  if (rule.step && rule.step > 1 && size % rule.step !== 0) return `Disk size must be a multiple of ${rule.step} GB`;
+  return '';
+}
+
+/**
+ * Root disk size rule (rootDiskSizeGB, already resolved for the image's OS by the API) of the selected option.
+ * @param {HTMLSelectElement} select - the root disk type select populated by populateRootDiskTypeSelect
+ */
+function getSelectedRootDiskRule(select) {
+  if (!select) return null;
+  const opt = select.options[select.selectedIndex];
+  if (!opt || !opt.dataset.rule) return null;
+  return JSON.parse(opt.dataset.rule);
+}
+
+/** Update the size placeholder and the tooltip (ⓘ icon + input title) next to a root disk type select. */
+function refreshRootDiskSizeHint(selectId, sizeInputId, hintId) {
+  const select = document.getElementById(selectId);
+  const sizeInput = document.getElementById(sizeInputId);
+  const hint = document.getElementById(hintId);
+  const rule = getSelectedRootDiskRule(select);
+  const txt = formatDiskSizeRule(rule);
+  if (sizeInput) sizeInput.placeholder = txt ? `Default (${txt})` : 'Default';
+  // Details stay hidden behind a tooltip (ⓘ icon / input hover) to keep the form compact.
+  const opt = select && select.options[select.selectedIndex];
+  const note = opt && opt.dataset.note ? opt.dataset.note : '';
+  const tip = [txt ? `Allowed: ${txt}` : '', note].filter(Boolean).join('\n');
+  if (sizeInput) sizeInput.title = tip;
+  if (hint) {
+    hint.title = tip;
+    hint.style.display = tip ? 'inline' : 'none';
+  }
+}
+
+/**
+ * Populate RootDiskType dropdown from GET .../spec/{specId}/diskOptions?imageId=.
+ * Option labels show the CSP-native identifier plus size range; each option carries its
+ * rootDiskSizeGB rule (resolved for the image's OS / minimum size) in data-rule.
+ * On API failure only "default" is offered.
+ * @param {string} selectId - DOM element ID of the select dropdown
+ * @param {object} spec - spec object ({id, providerName})
+ * @param {string} currentValue - Currently selected disk type value
+ * @param {object} [opts] - {sizeInputId, hintId, imageId}; imageId may be a string or a function
+ */
+async function populateRootDiskTypeSelect(selectId, spec, currentValue, opts = {}) {
   const select = document.getElementById(selectId);
   if (!select) return;
-  
-  const validTypes = ROOT_DISK_TYPES[providerName.toLowerCase()] || ['default'];
-  validTypes.forEach(type => {
+  const specId = spec && spec.id ? spec.id : '';
+  select.innerHTML = '';
+
+  const addOption = (value, label, rule, note) => {
     const option = document.createElement('option');
-    option.value = type;
-    option.textContent = type;
-    if (type === currentValue) option.selected = true;
+    option.value = value;
+    option.textContent = label;
+    if (rule) option.dataset.rule = JSON.stringify(rule);
+    if (note) option.dataset.note = note;
+    if (value === currentValue) option.selected = true;
     select.appendChild(option);
-  });
+    return option;
+  };
+
+  const imageId = typeof opts.imageId === 'function' ? opts.imageId() : (opts.imageId || '');
+  const data = await fetchSpecDiskOptions(specId, imageId);
+  if (data && data.supported && Array.isArray(data.diskTypes)) {
+    const defaultLabel = data.defaultRootDiskType ? `default (${data.defaultRootDiskType})` : 'default';
+    const imgNote = data.imageMinRootDiskSizeGB ? `Image needs ≥ ${data.imageMinRootDiskSizeGB} GB` : '';
+    addOption('default', defaultLabel, null, [imgNote, data.note || ''].filter(Boolean).join(' · '));
+    data.diskTypes.filter(t => t.rootDisk && t.available !== false).forEach(t => {
+      const range = formatDiskSizeRule(t.rootDiskSizeGB);
+      const label = `${t.diskType}${t.displayName && t.displayName !== t.diskType ? ' — ' + t.displayName : ''}${range ? ' (' + range + ')' : ''}`;
+      addOption(t.diskType, label, t.rootDiskSizeGB || null, t.note || (t.availability && t.availability.note) || '');
+    });
+    if (!data.rootDiskSelectable) select.disabled = true;
+  } else {
+    addOption('default', 'default', null, 'Disk options unavailable (diskOptions API failed)');
+  }
+  // Keep a previously chosen value even if it is not in the list (e.g. legacy CB-Spider alias).
+  if (currentValue && currentValue !== 'default' && !Array.from(select.options).some(o => o.value === currentValue)) {
+    addOption(currentValue, `${currentValue} (custom)`).selected = true;
+  }
+  if (opts.sizeInputId) {
+    const refresh = () => refreshRootDiskSizeHint(selectId, opts.sizeInputId, opts.hintId);
+    select.addEventListener('change', refresh);
+    refresh();
+  }
 }
 
 /**
@@ -11109,7 +11229,7 @@ function buildSpecConfigPopupHtml(spec, nodeConf, options = {}) {
         </div>
         <div class="popup-col">
           <div class="popup-field">
-            <label class="popup-label">Disk Size (GB)</label>
+            <label class="popup-label">Disk Size (GB) <span id="${isEdit ? 'editRootDiskSizeHint' : 'rootDiskSizeHint'}" style="display:none;cursor:help;color:#6c757d;" title="">ⓘ</span></label>
             <input type="text" id="${isEdit ? 'editRootDiskSize' : 'rootDiskSizeCustom'}" class="popup-input" value="${nodeConf.rootDiskSize > 0 ? nodeConf.rootDiskSize : ''}" placeholder="Default">
           </div>
         </div>
@@ -11628,7 +11748,8 @@ function editNodeGroup(index) {
     }),
     didOpen: () => {
       // Use common helpers for dropdown population
-      populateRootDiskTypeSelect('editRootDiskTypeSelect', spec.providerName, nodeConf.rootDiskType || 'default');
+      populateRootDiskTypeSelect('editRootDiskTypeSelect', spec, nodeConf.rootDiskType || 'default',
+        { sizeInputId: 'editRootDiskSize', hintId: 'editRootDiskSizeHint', imageId: nodeConf.imageId || '' });
       populateZoneSelect('editZoneSelect', 'editZoneLoadingSpinner', spec.id, currentZone, null);
       
       // Setup label input listener for chip sync
@@ -11653,6 +11774,16 @@ function editNodeGroup(index) {
       
       if (isNaN(count) || count < 1) {
         Swal.showValidationMessage('Please provide valid Node count');
+        return false;
+      }
+      if (diskSize && !/^\d+$/.test(diskSize)) {
+        Swal.showValidationMessage('Disk size must be empty (default) or a positive number');
+        return false;
+      }
+      const sizeErr = validateDiskSizeAgainstRule(parseInt(diskSize, 10) || 0,
+        getSelectedRootDiskRule(document.getElementById('editRootDiskTypeSelect')));
+      if (sizeErr) {
+        Swal.showValidationMessage(sizeErr);
         return false;
       }
       
