@@ -4005,6 +4005,11 @@ function displayInfraStatusGui(data) {
         ${metaHtml}
         ${buildInfraNodeSummaryHtml(data)}
         <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end;">
+          ${(data.statusCount?.countFailed > 0) ? `
+          <button type="button" onclick="reviewRetryFailedNodes('${esc(infraId)}')"
+            style="padding:7px 14px;font-size:13px;font-family:inherit;background:#dc2626;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600;margin-right:auto;">
+            🔄 Retry Failed (${data.statusCount.countFailed})
+          </button>` : ''}
           <button type="button" onclick="downloadAllSshKeys()"
             style="padding:7px 14px;font-size:13px;font-family:inherit;background:#16a34a;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600;">
             📦 SSH Keys
@@ -4021,6 +4026,232 @@ function displayInfraStatusGui(data) {
     showCancelButton: true,
     cancelButtonText: '✕ Close',
     width: '90%',
+  });
+}
+
+// ── Retry of failed Nodes ────────────────────────────────────────────────────
+// A CSP capacity refusal is transient, so re-creating a Node with its original
+// configuration often succeeds minutes later. Review first: failures that
+// retrying cannot fix (account quota, an image the spec rejects, a malformed
+// request) are listed with the reason instead of being retried.
+
+const RETRY_CLASS_STYLE = {
+  ZoneCapacity:       { icon: '⏳', label: 'Capacity shortage',   color: '#b45309', bg: '#fffbeb', border: '#fde68a' },
+  RegionCapacity:     { icon: '⏳', label: 'Region shortage',     color: '#b45309', bg: '#fffbeb', border: '#fde68a' },
+  Throttling:         { icon: '🐢', label: 'Rate limited',        color: '#b45309', bg: '#fffbeb', border: '#fde68a' },
+  Network:            { icon: '🔌', label: 'Network error',       color: '#b45309', bg: '#fffbeb', border: '#fde68a' },
+  AccountQuota:       { icon: '🚫', label: 'Account quota',       color: '#b91c1c', bg: '#fef2f2', border: '#fca5a5' },
+  Auth:               { icon: '🔑', label: 'Credential error',    color: '#b91c1c', bg: '#fef2f2', border: '#fca5a5' },
+  ImageSpecMismatch:  { icon: '💿', label: 'Image not usable',    color: '#b91c1c', bg: '#fef2f2', border: '#fca5a5' },
+  InvalidRequest:     { icon: '✏️', label: 'Request rejected',    color: '#b91c1c', bg: '#fef2f2', border: '#fca5a5' },
+  DiskTypeUnavailable:{ icon: '💾', label: 'Disk type unusable',  color: '#b91c1c', bg: '#fef2f2', border: '#fca5a5' },
+  Unknown:            { icon: '❓', label: 'Unrecognized',        color: '#475569', bg: '#f8fafc', border: '#cbd5e1' },
+};
+
+function retryClassStyle(cls) {
+  return RETRY_CLASS_STYLE[cls] || RETRY_CLASS_STYLE.Unknown;
+}
+
+// Step 1: ask CB-Tumblebug what can be retried, then show the plan for approval.
+async function reviewRetryFailedNodes(infraId) {
+  const esc = window.escapeHtml || (s => String(s));
+  const username = configUsername;
+  const password = configPassword;
+  const url = `${tbApiBase()}/ns/${configNamespace}/infra/${infraId}/retryFailedNodesReview`;
+
+  const taskId = addSpinnerTask(`Reviewing failed nodes of ${infraId}`);
+  let review;
+  try {
+    const res = await axios.post(url, {}, {
+      auth: { username, password },
+      headers: { 'Content-Type': 'application/json' }
+    });
+    review = res.data;
+  } catch (error) {
+    removeSpinnerTask(taskId);
+    Swal.fire({
+      title: 'Retry review failed',
+      text: error.response?.data?.message || error.message,
+      icon: 'error'
+    });
+    return;
+  }
+  removeSpinnerTask(taskId);
+
+  const plans = review.plans || [];
+  if (plans.length === 0) {
+    Swal.fire({ title: 'Nothing to retry', text: 'This infra has no failed node.', icon: 'info' });
+    return;
+  }
+
+  const retriable = plans.filter(p => p.action === 'retryInPlace');
+  const blocked   = plans.filter(p => p.action !== 'retryInPlace');
+
+  const planCard = (p, selectable) => {
+    const f = p.failure || {};
+    const st = retryClassStyle(f.class);
+    const zoneText = p.zone ? ` · ${esc(p.zone)}` : '';
+    const checkbox = selectable
+      ? `<input type="checkbox" class="retry-node-cb" value="${esc(p.nodeId)}" checked
+           style="margin-right:8px;transform:scale(1.15);cursor:pointer;">`
+      : '';
+    return `
+      <div style="border:1px solid ${st.border};background:${st.bg};border-radius:8px;padding:9px 12px;margin-bottom:8px;">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+          ${checkbox}
+          <b style="font-family:monospace;font-size:13px;color:#0f172a;">${esc(p.nodeId)}</b>
+          <span style="font-size:11px;color:#64748b;">${esc(p.provider || '')}${zoneText}</span>
+          <span style="background:${st.color};color:white;font-size:10px;font-weight:700;padding:1px 7px;border-radius:4px;">
+            ${st.icon} ${esc(st.label)}
+          </span>
+          ${p.costPerHour ? `<span style="margin-left:auto;font-size:11px;color:#475569;">$${p.costPerHour.toFixed(4)}/hr</span>` : ''}
+        </div>
+        <div style="font-size:12px;color:${st.color};margin-top:5px;line-height:1.5;">${esc(p.reason || '')}</div>
+        ${p.siblingSubnetId ? `<div style="font-size:11px;color:#166534;margin-top:4px;line-height:1.5;">
+          ✅ ${p.siblingRunningCount} sibling node(s) running in <b>${esc(p.siblingZone || p.siblingSubnetId)}</b> of the same VNet</div>` : ''}
+        ${p.escalation ? `<div style="font-size:11px;color:#64748b;margin-top:4px;line-height:1.5;">💡 ${esc(p.escalation)}</div>` : ''}
+      </div>`;
+  };
+
+  const html = `
+    <div style="text-align:left;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;color:#0f172a;">
+      <p style="color:#475569;font-size:13px;margin:0 0 12px;">${esc(review.message || '')}</p>
+
+      ${retriable.length ? `
+        <div style="font-size:12px;font-weight:700;color:#166534;text-transform:uppercase;letter-spacing:0.05em;margin:0 0 7px;">
+          Can be retried (${retriable.length})
+        </div>
+        ${retriable.map(p => planCard(p, true)).join('')}
+        <div style="display:flex;gap:14px;align-items:center;margin:12px 0 4px;flex-wrap:wrap;">
+          <label style="font-size:12px;color:#475569;">
+            Attempts per node
+            <input id="retryAttempts" type="number" min="1" max="10" value="3"
+              style="width:58px;margin-left:6px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:12px;">
+          </label>
+          <label style="font-size:12px;color:#475569;">
+            Interval (s)
+            <input id="retryInterval" type="number" min="1" max="600" value="30"
+              style="width:64px;margin-left:6px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:12px;">
+          </label>
+          <label style="font-size:12px;color:#475569;" title="1 retries one node at a time. Higher values are capped per CSP by the same limits infra provisioning uses.">
+            Parallel nodes
+            <input id="retryParallelism" type="number" min="1" max="20" value="1"
+              style="width:58px;margin-left:6px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:12px;">
+          </label>
+        </div>
+        <p style="font-size:11px;color:#94a3b8;margin:2px 0 0;line-height:1.5;">
+          Each replacement keeps the failed node's zone, subnet, VNet, security group and key,
+          so it stays on the same private network. The failed record is removed once its
+          replacement is up. Parallel retries are capped per CSP by the same limits
+          infra provisioning uses.
+        </p>
+        ${retriable.some(p => p.siblingSubnetId) ? `
+        <label style="display:flex;gap:7px;align-items:flex-start;margin-top:10px;padding:8px 10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;cursor:pointer;">
+          <input id="retryPreferAvailableSubnet" type="checkbox" style="margin-top:2px;transform:scale(1.15);cursor:pointer;">
+          <span style="font-size:12px;color:#166534;line-height:1.5;">
+            <b>Place in a subnet where siblings are running</b><br>
+            <span style="color:#475569;">A running sibling is the best capacity evidence available, though not a
+            guarantee. It stays in the same VNet, so the VPC, security group and key are unchanged —
+            but the NodeGroup ends up less spread across zones.</span>
+          </span>
+        </label>` : ''}` : ''}
+
+      ${blocked.length ? `
+        <div style="font-size:12px;font-weight:700;color:#b91c1c;text-transform:uppercase;letter-spacing:0.05em;margin:16px 0 7px;">
+          Retrying will not help (${blocked.length})
+        </div>
+        ${blocked.map(p => planCard(p, false)).join('')}` : ''}
+    </div>`;
+
+  const result = await Swal.fire({
+    title: `🔄 Retry Failed Nodes: ${esc(infraId)}`,
+    html,
+    background: '#ffffff',
+    color: '#0f172a',
+    width: '760px',
+    showCancelButton: true,
+    showConfirmButton: retriable.length > 0,
+    confirmButtonText: `Retry ${retriable.length} node(s)`,
+    confirmButtonColor: '#dc2626',
+    cancelButtonText: 'Close',
+    preConfirm: () => ({
+      nodeIds: Array.from(document.querySelectorAll('.retry-node-cb:checked')).map(cb => cb.value),
+      attemptsPerNode: parseInt(document.getElementById('retryAttempts')?.value, 10) || 1,
+      intervalSeconds: parseInt(document.getElementById('retryInterval')?.value, 10) || 30,
+      preferAvailableSubnet: !!document.getElementById('retryPreferAvailableSubnet')?.checked,
+      parallelism: parseInt(document.getElementById('retryParallelism')?.value, 10) || 1,
+    }),
+  });
+
+  if (result.isConfirmed && result.value?.nodeIds?.length) {
+    await executeRetryFailedNodes(infraId, result.value);
+  }
+}
+
+// Step 2: run the approved retry. One node at a time server-side, so the call
+// can take several minutes when attempts and interval are large.
+async function executeRetryFailedNodes(infraId, req) {
+  const esc = window.escapeHtml || (s => String(s));
+  const username = configUsername;
+  const password = configPassword;
+  const url = `${tbApiBase()}/ns/${configNamespace}/infra/${infraId}/retryFailedNodes`;
+
+  const taskId = addSpinnerTask(`Retrying ${req.nodeIds.length} node(s) of ${infraId}`);
+  let data;
+  try {
+    const res = await axios.post(url, req, {
+      auth: { username, password },
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 0,
+    });
+    data = res.data;
+  } catch (error) {
+    removeSpinnerTask(taskId);
+    Swal.fire({
+      title: 'Retry failed',
+      text: error.response?.data?.message || error.message,
+      icon: 'error'
+    });
+    return;
+  }
+  removeSpinnerTask(taskId);
+
+  const rows = (data.results || []).map(r => {
+    const ok = r.succeeded;
+    const color = ok ? '#166534' : (r.skipped ? '#64748b' : '#b91c1c');
+    const icon  = ok ? '✅' : (r.skipped ? '⏭️' : '❌');
+    const outcome = ok
+      ? `→ <b style="font-family:monospace;">${esc(r.newNodeId || '')}</b> after ${r.attempts} attempt(s)`
+      : (r.skipped ? 'skipped' : `still failing after ${r.attempts} attempt(s)`);
+    const detail = r.reason || r.lastFailure?.message || '';
+    return `
+      <div style="border-bottom:1px solid #f1f5f9;padding:7px 0;">
+        <div style="font-size:13px;color:${color};">
+          ${icon} <b style="font-family:monospace;">${esc(r.nodeId)}</b> ${outcome}
+          ${r.placedInSubnetId ? `<span style="font-size:11px;color:#94a3b8;"> · in ${esc(r.placedInSubnetId)}</span>` : ''}
+          ${r.failedNodeRemoved ? '<span style="font-size:11px;color:#94a3b8;"> · failed record removed</span>' : ''}
+        </div>
+        ${detail ? `<div style="font-size:11px;color:#64748b;margin-top:3px;line-height:1.5;">${esc(detail)}</div>` : ''}
+      </div>`;
+  }).join('');
+
+  await Swal.fire({
+    title: data.succeededCount > 0 ? '🔄 Retry finished' : '🔄 Retry finished — nothing recovered',
+    html: `
+      <div style="text-align:left;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:14px;color:#0f172a;">
+        <p style="color:#475569;font-size:13px;margin:0 0 10px;">
+          ${esc(data.message || '')} &nbsp;·&nbsp; ${data.elapsedSeconds}s
+          ${data.infraStatus ? ` &nbsp;·&nbsp; ${esc(data.infraStatus)}` : ''}
+          ${data.parallelismUsed ? `<br><span style="font-size:11px;color:#94a3b8;">parallel: ${
+            Object.entries(data.parallelismUsed).map(([c, n]) => `${esc(c)} ×${n}`).join(', ')}</span>` : ''}
+        </p>
+        ${rows}
+      </div>`,
+    icon: data.succeededCount > 0 ? 'success' : 'warning',
+    background: '#ffffff',
+    color: '#0f172a',
+    width: '700px',
+    confirmButtonText: 'OK',
   });
 }
 
@@ -21721,6 +21952,8 @@ function downloadAllSshKeys(infraIdOverride) {
   });
 }
 window.downloadAllSshKeys = downloadAllSshKeys;
+window.reviewRetryFailedNodes = reviewRetryFailedNodes;
+window.executeRetryFailedNodes = executeRetryFailedNodes;
 
 // Global array to store X-Request-Ids
 let xRequestIds = [];
