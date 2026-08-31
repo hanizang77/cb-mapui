@@ -4094,7 +4094,11 @@ async function reviewRetryFailedNodes(infraId) {
     const checkbox = selectable
       ? `<input type="checkbox" class="retry-node-cb" value="${esc(p.nodeId)}" checked
            style="margin-right:8px;transform:scale(1.15);cursor:pointer;">`
-      : '';
+      : (p.assumeResolvedHelps
+        ? `<input type="checkbox" class="retry-node-cb" value="${esc(p.nodeId)}" data-assume-resolved="1"
+             title="Retry this node, asserting the block was lifted outside CB-Tumblebug"
+             style="margin-right:8px;transform:scale(1.15);cursor:pointer;">`
+        : '');
     return `
       <div style="border:1px solid ${st.border};background:${st.bg};border-radius:8px;padding:9px 12px;margin-bottom:8px;">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
@@ -4109,6 +4113,25 @@ async function reviewRetryFailedNodes(infraId) {
         <div style="font-size:12px;color:${st.color};margin-top:5px;line-height:1.5;">${esc(p.reason || '')}</div>
         ${p.siblingSubnetId ? `<div style="font-size:11px;color:#166534;margin-top:4px;line-height:1.5;">
           ✅ ${p.siblingRunningCount} sibling node(s) running in <b>${esc(p.siblingZone || p.siblingSubnetId)}</b> of the same VNet</div>` : ''}
+        ${(selectable && p.zoneCapability?.shiftable) ? `<div style="font-size:11px;color:#475569;margin-top:5px;">
+          🌐 Zone:
+          <select class="retry-zone-sel" data-node="${esc(p.nodeId)}" data-sibling-zone="${esc(p.siblingZone || '')}"
+            style="margin-left:4px;padding:2px 5px;border:1px solid #cbd5e1;border-radius:4px;font-size:11px;">
+            <option value="">keep ${esc(p.zone || 'current')}</option>
+            ${(p.zoneCapability.zones || []).filter(z => z !== p.zone)
+              .map(z => `<option value="${esc(z)}">${esc(z)}</option>`).join('')}
+          </select>
+          <span style="color:#94a3b8;"> — a subnet of this same VNet, so the VPC and security group are unchanged</span>
+        </div>` : ''}
+        ${(!selectable && p.assumeResolvedHelps) ? `<div style="font-size:11px;color:#b45309;margin-top:4px;line-height:1.5;">
+          ☑️ Tick to retry anyway — only if you resolved the block with the provider since.</div>` : ''}
+        ${(!selectable && !p.assumeResolvedHelps) ? `<div style="margin-top:6px;">
+          <button type="button" onclick="fixAndReplaceNodeGroup('${esc(infraId)}','${esc(p.nodeGroupId)}')"
+            style="padding:4px 10px;font-size:11px;font-family:inherit;background:#b91c1c;color:white;border:none;border-radius:5px;cursor:pointer;font-weight:600;">
+            🔧 Fix and re-create NodeGroup ${esc(p.nodeGroupId)}
+          </button>
+          <span style="font-size:11px;color:#94a3b8;margin-left:6px;">only if every node of the group failed</span>
+        </div>` : ''}
         ${p.escalation ? `<div style="font-size:11px;color:#64748b;margin-top:4px;line-height:1.5;">💡 ${esc(p.escalation)}</div>` : ''}
       </div>`;
   };
@@ -4133,26 +4156,34 @@ async function reviewRetryFailedNodes(infraId) {
             <input id="retryInterval" type="number" min="1" max="600" value="30"
               style="width:64px;margin-left:6px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:12px;">
           </label>
-          <label style="font-size:12px;color:#475569;" title="1 retries one node at a time. Higher values are capped per CSP by the same limits infra provisioning uses.">
+          <label style="font-size:12px;color:#475569;" title="auto retries as many at once as the CSP allows.">
             Parallel nodes
-            <input id="retryParallelism" type="number" min="1" max="20" value="1"
-              style="width:58px;margin-left:6px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:12px;">
+            <select id="retryParallelism"
+              style="margin-left:6px;padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:12px;">
+              <option value="">auto (CSP limit)</option>
+              <option value="1">1 — one at a time</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="5">5</option>
+              <option value="10">10</option>
+            </select>
           </label>
         </div>
         <p style="font-size:11px;color:#94a3b8;margin:2px 0 0;line-height:1.5;">
           Each replacement keeps the failed node's zone, subnet, VNet, security group and key,
           so it stays on the same private network. The failed record is removed once its
-          replacement is up. Parallel retries are capped per CSP by the same limits
-          infra provisioning uses.
+          replacement is up. Nodes are retried in parallel up to the per-CSP limit infra
+          provisioning already obeys; pick <b>1</b> to watch them go one at a time.
         </p>
         ${retriable.some(p => p.siblingSubnetId) ? `
         <label style="display:flex;gap:7px;align-items:flex-start;margin-top:10px;padding:8px 10px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;cursor:pointer;">
-          <input id="retryPreferAvailableSubnet" type="checkbox" style="margin-top:2px;transform:scale(1.15);cursor:pointer;">
+          <input id="retryPreferAvailableSubnet" type="checkbox" onchange="applySiblingZones(this.checked)"
+            style="margin-top:2px;transform:scale(1.15);cursor:pointer;">
           <span style="font-size:12px;color:#166534;line-height:1.5;">
-            <b>Place in a subnet where siblings are running</b><br>
-            <span style="color:#475569;">A running sibling is the best capacity evidence available, though not a
-            guarantee. It stays in the same VNet, so the VPC, security group and key are unchanged —
-            but the NodeGroup ends up less spread across zones.</span>
+            <b>Use the zones where siblings are running</b><br>
+            <span style="color:#475569;">Sets each zone picker above to a zone of the same VNet that already holds
+            running peers — the best capacity evidence available, though not a guarantee. Adjust any of
+            them afterwards; the NodeGroup does end up less spread across zones.</span>
           </span>
         </label>` : ''}` : ''}
 
@@ -4174,18 +4205,175 @@ async function reviewRetryFailedNodes(infraId) {
     confirmButtonText: `Retry ${retriable.length} node(s)`,
     confirmButtonColor: '#dc2626',
     cancelButtonText: 'Close',
-    preConfirm: () => ({
-      nodeIds: Array.from(document.querySelectorAll('.retry-node-cb:checked')).map(cb => cb.value),
-      attemptsPerNode: parseInt(document.getElementById('retryAttempts')?.value, 10) || 1,
-      intervalSeconds: parseInt(document.getElementById('retryInterval')?.value, 10) || 30,
-      preferAvailableSubnet: !!document.getElementById('retryPreferAvailableSubnet')?.checked,
-      parallelism: parseInt(document.getElementById('retryParallelism')?.value, 10) || 1,
-    }),
+    // One target per checked node, carrying that node's own settings — the same
+    // shape the review returns, so what the dialog shows is what gets sent.
+    preConfirm: () => {
+      const zoneOf = (nodeId) =>
+        document.querySelector(`.retry-zone-sel[data-node="${nodeId}"]`)?.value || '';
+      return {
+        targets: Array.from(document.querySelectorAll('.retry-node-cb:checked')).map(cb => {
+          const target = { nodeId: cb.value };
+          const zone = zoneOf(cb.value);
+          if (zone) target.zone = zone;
+          if (cb.dataset.assumeResolved === '1') target.assumeResolved = true;
+          return target;
+        }),
+        attemptsPerNode: parseInt(document.getElementById('retryAttempts')?.value, 10) || 3,
+        intervalSeconds: parseInt(document.getElementById('retryInterval')?.value, 10) || 30,
+        parallelism: parseInt(document.getElementById('retryParallelism')?.value, 10) || 0,
+      };
+    },
   });
 
-  if (result.isConfirmed && result.value?.nodeIds?.length) {
+  if (result.isConfirmed && result.value?.targets?.length) {
     await executeRetryFailedNodes(infraId, result.value);
   }
+}
+
+// Some failures cannot be retried at all — an image the CSP does not have, a root
+// disk too small for the flavor. Re-sending the same request fails identically, so
+// the NodeGroup has to be re-created from a corrected one. Spec is shown read-only:
+// instance type decides cost, performance and availability together, and changing
+// it is a new NodeGroup rather than a correction of this one.
+async function fixAndReplaceNodeGroup(infraId, nodeGroupId) {
+  const esc = window.escapeHtml || (s => String(s));
+  const username = configUsername;
+  const password = configPassword;
+  const base = `${tbApiBase()}/ns/${configNamespace}/infra/${infraId}`;
+
+  // Read the group's current request from one of its nodes.
+  const taskId = addSpinnerTask(`Reading ${nodeGroupId} of ${infraId}`);
+  let nodes = [];
+  try {
+    const ids = (await axios.get(`${base}/nodegroup/${nodeGroupId}`, { auth: { username, password } })).data?.output || [];
+    nodes = await Promise.all(ids.map(id =>
+      axios.get(`${base}/node/${id}`, { auth: { username, password } }).then(r => r.data)));
+  } catch (error) {
+    removeSpinnerTask(taskId);
+    Swal.fire({ title: 'Could not read the NodeGroup', text: error.response?.data?.message || error.message, icon: 'error' });
+    return;
+  }
+  removeSpinnerTask(taskId);
+
+  const alive = nodes.filter(n => !String(n.status || '').toLowerCase().includes('fail'));
+  if (alive.length) {
+    Swal.fire({
+      title: 'NodeGroup is partly running',
+      html: `<div style="text-align:left;font-size:13px;">
+        ${alive.length} node(s) of <b>${esc(nodeGroupId)}</b> are not failed, so re-creating it would
+        destroy working machines. Add a new NodeGroup with the corrected settings instead.</div>`,
+      icon: 'warning',
+    });
+    return;
+  }
+  const first = nodes[0] || {};
+
+  const result = await Swal.fire({
+    title: `🔧 Re-create NodeGroup: ${esc(nodeGroupId)}`,
+    html: `
+      <div style="text-align:left;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px;color:#0f172a;">
+        <p style="color:#475569;font-size:12px;margin:0 0 12px;line-height:1.6;">
+          All ${nodes.length} node(s) failed. Correct the request below and CB-Tumblebug will clear them
+          and create the NodeGroup again under the same name.
+        </p>
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:8px 10px;align-items:center;">
+          <label style="color:#64748b;">Spec</label>
+          <input value="${esc(first.specId || '')}" readonly title="Changing the instance type means a new NodeGroup"
+            style="padding:5px 8px;border:1px solid #e2e8f0;border-radius:5px;font-size:12px;background:#f8fafc;color:#94a3b8;">
+          <label style="color:#64748b;">Image</label>
+          <input id="ngImageId" value="${esc(first.imageId || '')}"
+            style="padding:5px 8px;border:1px solid #cbd5e1;border-radius:5px;font-size:12px;">
+          <label style="color:#64748b;">Root disk type</label>
+          <input id="ngRootDiskType" value="${esc(first.rootDiskType || '')}" placeholder="default"
+            style="padding:5px 8px;border:1px solid #cbd5e1;border-radius:5px;font-size:12px;">
+          <label style="color:#64748b;">Root disk size (GB)</label>
+          <input id="ngRootDiskSize" type="number" min="0" value="${first.rootDiskSize || 0}"
+            style="padding:5px 8px;border:1px solid #cbd5e1;border-radius:5px;font-size:12px;">
+          <label style="color:#64748b;">Nodes</label>
+          <input id="ngSize" type="number" min="1" value="${nodes.length}"
+            style="padding:5px 8px;border:1px solid #cbd5e1;border-radius:5px;font-size:12px;">
+        </div>
+        <p style="font-size:11px;color:#94a3b8;margin:12px 0 0;line-height:1.5;">
+          The failed records are cleared first, so their error messages are returned in the result
+          rather than kept. Nothing exists on the CSP for them to lose.
+        </p>
+      </div>`,
+    background: '#ffffff',
+    color: '#0f172a',
+    width: '620px',
+    showCancelButton: true,
+    confirmButtonText: 'Validate & re-create',
+    confirmButtonColor: '#b91c1c',
+    preConfirm: () => ({
+      name: nodeGroupId,
+      specId: first.specId,
+      imageId: document.getElementById('ngImageId')?.value?.trim(),
+      rootDiskType: document.getElementById('ngRootDiskType')?.value?.trim() || undefined,
+      rootDiskSize: parseInt(document.getElementById('ngRootDiskSize')?.value, 10) || undefined,
+      nodeGroupSize: parseInt(document.getElementById('ngSize')?.value, 10) || nodes.length,
+      label: first.label && typeof first.label === 'object'
+        ? Object.fromEntries(Object.entries(first.label).filter(([k]) => !k.startsWith('sys.'))) : undefined,
+    }),
+  });
+  if (!result.isConfirmed || !result.value) return;
+
+  // The same body the create endpoint takes, so the existing review validates it.
+  const reqBody = result.value;
+  const t2 = addSpinnerTask(`Validating ${nodeGroupId}`);
+  try {
+    const review = (await axios.post(`${base}/nodeGroupDynamicReview`, reqBody, {
+      auth: { username, password }, headers: { 'Content-Type': 'application/json' },
+    })).data;
+    removeSpinnerTask(t2);
+    const problems = (review?.nodeGroup?.errors || review?.errors || []).filter(Boolean);
+    if (problems.length) {
+      const go = await Swal.fire({
+        title: 'The corrected request still has problems',
+        html: `<div style="text-align:left;font-size:12px;color:#b91c1c;">${problems.map(esc).join('<br>')}</div>`,
+        icon: 'warning', showCancelButton: true, confirmButtonText: 'Re-create anyway',
+      });
+      if (!go.isConfirmed) return;
+    }
+  } catch (e) {
+    removeSpinnerTask(t2);
+    // Validation is advisory; a review that cannot run must not block the fix.
+    console.warn('NodeGroup review failed:', e);
+  }
+
+  const t3 = addSpinnerTask(`Re-creating ${nodeGroupId}`);
+  try {
+    const res = await axios.put(`${base}/nodeGroupDynamic/${nodeGroupId}`, reqBody, {
+      auth: { username, password }, headers: { 'Content-Type': 'application/json' }, timeout: 0,
+    });
+    removeSpinnerTask(t3);
+    const d = res.data;
+    await Swal.fire({
+      title: '🔧 NodeGroup re-created',
+      html: `<div style="text-align:left;font-size:13px;">
+        ${esc(d.message || '')}
+        ${(d.removedNodes || []).length ? `<div style="font-size:11px;color:#64748b;margin-top:8px;">
+          cleared: ${d.removedNodes.map(n => esc(n.nodeId)).join(', ')}</div>` : ''}
+      </div>`,
+      icon: 'success', confirmButtonText: 'OK',
+    });
+  } catch (error) {
+    removeSpinnerTask(t3);
+    const d = error.response?.data;
+    Swal.fire({
+      title: error.response?.status === 409 ? 'Cannot re-create this NodeGroup' : 'Re-create failed',
+      html: `<div style="text-align:left;font-size:13px;">${esc(d?.message || error.message)}</div>`,
+      icon: 'error',
+    });
+  }
+}
+
+// Fills every zone picker with the zone where that node's peers run, so the choice
+// is visible in the dialog rather than applied invisibly by the server.
+function applySiblingZones(on) {
+  document.querySelectorAll('.retry-zone-sel').forEach(sel => {
+    const zone = on ? (sel.dataset.siblingZone || '') : '';
+    if (!on || Array.from(sel.options).some(o => o.value === zone)) sel.value = zone;
+  });
 }
 
 // Step 2: run the approved retry. One node at a time server-side, so the call
@@ -4196,7 +4384,7 @@ async function executeRetryFailedNodes(infraId, req) {
   const password = configPassword;
   const url = `${tbApiBase()}/ns/${configNamespace}/infra/${infraId}/retryFailedNodes`;
 
-  const taskId = addSpinnerTask(`Retrying ${req.nodeIds.length} node(s) of ${infraId}`);
+  const taskId = addSpinnerTask(`Retrying ${req.targets.length} node(s) of ${infraId}`);
   let data;
   try {
     const res = await axios.post(url, req, {
@@ -4228,7 +4416,7 @@ async function executeRetryFailedNodes(infraId, req) {
       <div style="border-bottom:1px solid #f1f5f9;padding:7px 0;">
         <div style="font-size:13px;color:${color};">
           ${icon} <b style="font-family:monospace;">${esc(r.nodeId)}</b> ${outcome}
-          ${r.placedInSubnetId ? `<span style="font-size:11px;color:#94a3b8;"> · in ${esc(r.placedInSubnetId)}</span>` : ''}
+          ${r.placedInZone ? `<span style="font-size:11px;color:#94a3b8;"> · in ${esc(r.placedInZone)}</span>` : (r.placedInSubnetId ? `<span style="font-size:11px;color:#94a3b8;"> · in ${esc(r.placedInSubnetId)}</span>` : '')}
           ${r.failedNodeRemoved ? '<span style="font-size:11px;color:#94a3b8;"> · failed record removed</span>' : ''}
         </div>
         ${detail ? `<div style="font-size:11px;color:#64748b;margin-top:3px;line-height:1.5;">${esc(detail)}</div>` : ''}
@@ -21954,6 +22142,8 @@ function downloadAllSshKeys(infraIdOverride) {
 window.downloadAllSshKeys = downloadAllSshKeys;
 window.reviewRetryFailedNodes = reviewRetryFailedNodes;
 window.executeRetryFailedNodes = executeRetryFailedNodes;
+window.applySiblingZones = applySiblingZones;
+window.fixAndReplaceNodeGroup = fixAndReplaceNodeGroup;
 
 // Global array to store X-Request-Ids
 let xRequestIds = [];
